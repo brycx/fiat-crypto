@@ -549,14 +549,6 @@ Section S.
   End Gallina.
 
   Section Bedrock.
-    (* FIXME: define exponent as  Z.to_pos (2 ^ 255 - 17) and rewrite exponent_correct during proof. *)
-    Definition exponent : positive :=
-      57896044618658097711785492504343953926634992332820282019728792003956564819951.
-
-    Lemma exponent_correct :
-      exponent = Z.to_pos (2 ^ 255 - 17).
-    Proof. reflexivity. Qed.
-
     Hint Resolve @relax_bounds : compiler.
 
     Create HintDb lowering.
@@ -568,7 +560,6 @@ Section S.
     Hint Unfold run_length_encoding : lowering.
     Hint Unfold exp_square : lowering.
     Hint Unfold exp_square_and_multiply : lowering.
-    Hint Unfold exponent : lowering.
 
     Ltac lower_step :=
       match goal with
@@ -690,24 +681,9 @@ Section S.
     repeat compile_step.
     Qed.
 
-    (* FIXME remove *)
-    Derive rewritten_encoded SuchThat
-           (forall x, rewritten_encoded x = (x, let/n res := exp_by_squaring_encoded x exponent in res))
-           As rewrite'.
-    Proof.
-      lower.
-    Qed.
+    Let exp (n: positive) (x: F M_pos) := F.pow x (N.pos n).
 
-    Definition exp (n: positive) (x: F M_pos) :=
-      F.pow x (N.pos n).
-
-    Notation expn n :=
-      ltac:(let n := constr:(NilEmpty.string_of_uint (Pos.to_uint n)) in
-            let s := constr:(String.append "exp_" n%positive) in
-            let s := eval cbv in s in
-                exact s) (only parsing).
-
-    Instance spec_of_exp97 : spec_of (expn 97) :=
+    Instance spec_of_exp97 : spec_of ("exp_97") :=
       fnspec! "exp_97" (x_ptr sq_ptr : word) / (x sq : F M_pos) R,
       { requires tr mem :=
           (FElem (Some tight_bounds) x_ptr x
@@ -717,15 +693,15 @@ Section S.
           /\ (FElem (Some tight_bounds) x_ptr x
               * FElem (Some tight_bounds) sq_ptr (exp 97 x)  * R)%sep mem'}.
 
-    Instance spec_of_exp_large : spec_of (expn exponent) :=
-      fnspec! (expn exponent) (x_ptr sq_ptr : word) / (x sq : F M_pos) R,
+    Local Instance spec_of_fe_inv_as_exp : spec_of "fe25519_inv" :=
+      fnspec! "fe25519_inv" (x_ptr sq_ptr : word) / (x sq : F M_pos) R,
       { requires tr mem :=
           (FElem (Some tight_bounds) x_ptr x
            * FElem (Some tight_bounds) sq_ptr sq * R)%sep mem;
         ensures tr' mem' :=
           tr = tr'
           /\ (FElem (Some tight_bounds) x_ptr x
-              * FElem (Some tight_bounds) sq_ptr (exp exponent x)  * R)%sep mem'}.
+          * FElem (Some tight_bounds) sq_ptr (exp (2^255-19-2) x)  * R)%sep mem'}.
 
     Context (M_nz: M <> 0).
 
@@ -739,8 +715,9 @@ Section S.
 
     Ltac rewrite_exponentiation lemma :=
       lazymatch goal with
-      | |- WeakestPrecondition.cmd _ _ _ ?mem _ (_ (?x ^ N.pos ?n)%F) =>
-          eassert (?[rewritten] = (x ^ N.pos n)%F) as <-
+      | |- WeakestPrecondition.cmd _ _ _ ?mem _ (_ (?x ^ ?n)%F) =>
+          let v := eval vm_compute in n in
+          eassert (?[rewritten] = (x ^ v)%F) as <-
             by (rewrite <- lemma by assumption;
                 lower_setup; cbn -[loop]; repeat lower_step; reflexivity)
       end.
@@ -755,15 +732,38 @@ Section S.
       compile.
     Qed.
 
-    Derive exp_large_body SuchThat
-           (defn! (expn exponent) ("x", "res") { exp_large_body },
-            implements (exp exponent) using [square; mul])
-           As exp_large_body_correct.
+    Derive fe25519_inv SuchThat
+      (defn! "fe25519_inv" ("x", "res") { fe25519_inv },
+      implements (exp (2^255-19-2)) using [square; mul])
+      As exp_large_body_correct.
     Proof.
+      unfold spec_of_fe_inv_as_exp.
+      intros.
+      let v := eval vm_compute in ((2 ^ 255 - 19 - 2)%positive) in
+      change ((2 ^ 255 - 19 - 2)%positive) with v in *.
       compile.
     Qed.
 
-    Eval cbn in  exp_large_body.
+    Global Instance spec_of_fe25519_inv : spec_of "fe25519_inv" :=
+      fnspec! "fe25519_inv" (x_ptr sq_ptr : word) / (x sq : F M_pos) R,
+      { requires tr mem :=
+          (FElem (Some tight_bounds) x_ptr x
+           * FElem (Some tight_bounds) sq_ptr sq * R)%sep mem;
+        ensures tr' mem' :=
+          tr = tr'
+          /\ (FElem (Some tight_bounds) x_ptr x
+          * FElem (Some tight_bounds) sq_ptr (F.inv x)  * R)%sep mem'}.
+
+    Lemma fe_inv_correct : 
+      Z.pos M_pos = 2^255-19 ->
+      Znumtheory.prime (N.pos M_pos) ->
+      program_logic_goal_for_function! fe25519_inv.
+    Proof.
+      intros Hm HmPrime ? ** ? **.
+      eapply Proper_call; [|eapply exp_large_body_correct; eauto 1; exact I].
+      intros ? ** ? ** ? ** ?; intuition idtac.
+      unshelve erewrite F.Fq_inv_fermat; rewrite Hm; try assumption; try vm_decide.
+    Qed.
 
   End Bedrock.
 
@@ -789,6 +789,4 @@ Section Extraction.
        to_bytes := "to_bytes";
        felem_copy := "felem_copy";
        felem_small_literal := "felem_small_literal" |}.
-
-  Compute ToCString.c_func exp_large_body.
 End Extraction.
